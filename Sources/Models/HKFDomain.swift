@@ -12,6 +12,10 @@ public extension HKFDomain {
     static var meditation: HKFDomain = .init(
             associatedTypes: [.mindfulMinutes]
     )
+
+    static var pedometer: HKFDomain = .init(
+            associatedTypes: [.steps, .distance]
+    )
 }
 
 public struct HKFDomain: Sendable {

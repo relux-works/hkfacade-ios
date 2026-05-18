@@ -6,6 +6,7 @@ public protocol AnyHKFacade {
     var isAvailable: Bool { get }
     func requestAccess(_ domains: HKFDomain...) async -> Result<Bool, HKFError>
     func requestAccess(_ domains: [HKFDomain]) async -> Result<Bool, HKFError>
+    func requestAccess(_ request: HKFAuthorizationRequest) async -> Result<Bool, HKFError>
 
     func readSamples(request: HKReadSamplesRequest) async -> Result<[HKFStatsSample], HKFError>
     func quantityStatsSubscription(request: HKReadStatsRequest) -> AnyPublisher<HKFStatsCollection, HKFError>
@@ -13,6 +14,23 @@ public protocol AnyHKFacade {
     func write(request: HKWriteRequest) async -> Result<Void, HKFError>
 
     func remoteDataStream(request: HKReadStatsRequest) -> AsyncStream<Result<HKStatisticsCollection, HKFError>>
+}
+
+public extension AnyHKFacade {
+    /// Default implementation that falls back to symmetric read/write authorization.
+    ///
+    /// `HKFacade` overrides this to provide the real split-permission behavior.
+    /// This default exists so mocks and alternative conformers compile without
+    /// implementing the new requirement.
+    func requestAccess(_ request: HKFAuthorizationRequest) async -> Result<Bool, HKFError> {
+        let merged = HKFDomain(associatedTypes: Array(Set(request.read + request.write)))
+        return await requestAccess([merged])
+    }
+
+    /// Convenience overload that builds the request from read/write domains.
+    func requestAccess(read: [HKFDomain], write: [HKFDomain]) async -> Result<Bool, HKFError> {
+        await requestAccess(.from(read: read, write: write))
+    }
 }
 
 public final class HKFacade: AnyHKFacade {
@@ -40,6 +58,10 @@ extension HKFacade {
         return await requestAccess(toShare: types, toRead: types)
     }
 
+    public func requestAccess(_ request: HKFAuthorizationRequest) async -> Result<Bool, HKFError> {
+        await requestAccess(toShare: request.write, toRead: request.read)
+    }
+
     private func requestAccess(toShare: [HKFMetricType], toRead: [HKFMetricType]) async -> Result<Bool, HKFError> {
         await withCheckedContinuation { continuation in
             guard let hkStore = hkStore else {
@@ -48,7 +70,7 @@ extension HKFacade {
 
             hkStore.requestAuthorization(
                     toShare: Set(toShare.compactMap { $0.asSampleType }),
-                    read: Set(toRead.compactMap { $0.asHKQuantityType })
+                    read: Set(toRead.compactMap { $0.asHKObjectType })
             ) { flag, error in
                 if let error = error {
                     return continuation.resume(returning: .failure(HKFError.general(error)))
@@ -68,7 +90,7 @@ extension HKFacade {
 
                 hkStore.requestAuthorization(
                         toShare: Set(toShare.compactMap { $0.asSampleType }),
-                        read: Set(toRead.compactMap { $0.asHKQuantityType })
+                        read: Set(toRead.compactMap { $0.asHKObjectType })
                 ) { flag, error in
                     if let error = error {
                         promise(.failure(.general(error)))
@@ -383,6 +405,10 @@ extension HKFacade {
     }
 
     public func readStats(request: HKReadStatsRequest) async -> Result<HKFStatsCollection, HKFError> {
+        if request.associatedType.usesQuantityStatsCollection {
+            return await readQuantityStats(request: request)
+        }
+
         guard let samplesRequest = HKFModelBuilder.buildReadSamplesRequest(by: request) else {
             return .failure(.failedToReadStats(msg: "build request failed: \(request.associatedType) is not supported"))
         }
@@ -391,7 +417,7 @@ extension HKFacade {
         guard case let .success(collection) = res else {
             return .failure(.failedToReadStats(msg: "error occurred"))
         }
-        
+
         let stats = collection
                 .groupBy(request.cadence.calendarComponents)
                 .lazy
@@ -405,19 +431,71 @@ extension HKFacade {
         return .success(HKFStatsCollection(stats: stats, aggregation: request.aggregation, metricType: request.associatedType))
     }
 
-    private func buildPeriod(_ dateComponents: DateComponents, cadence: HKFCadence) -> HKFPeriod? {
-        guard let start = Calendar.current.date(from: dateComponents) else { return nil }
-        let end: Date!
-        switch cadence {
-        case .years: end = start.add(years: 1)
-        case .months: end = start.add(months: 1)
-        case .weeks: end = start.add(weeks: 1)
-        case .days: end = start.add(days: 1)
-        case .hours: end = start.add(hours: 1)
-        case .minutes: end = start.add(months: 1)
+    /// Quantity-stats path backed by `HKStatisticsCollectionQuery`.
+    ///
+    /// This is the canonical HealthKit API for cumulative quantities (steps, distance,
+    /// energy) and discrete quantities (heart rate, oxygen saturation). It correctly
+    /// reconciles overlapping samples across sources, which the sample-side grouping
+    /// path does not.
+    private func readQuantityStats(request: HKReadStatsRequest) async -> Result<HKFStatsCollection, HKFError> {
+        guard let hkStore = hkStore else { return .failure(.hkNotAvailable) }
+        guard let quantityType = request.associatedType.asQuantityType else {
+            return .failure(.failedToGetQuantityType)
+        }
+        guard request.associatedType.supportsQuantityStatsAggregation(request.aggregation) else {
+            return .failure(.unsupportedAggregation(
+                metric: request.associatedType,
+                aggregation: request.aggregation
+            ))
         }
 
-        return .init(start: start, end: end)
+        return await withCheckedContinuation { continuation in
+            let query = HKStatisticsCollectionQuery(
+                quantityType: quantityType,
+                quantitySamplePredicate: HKFModelBuilder.build(
+                    request.predicate,
+                    units: request.associatedType.units
+                ),
+                options: request.aggregation.asStatsOption,
+                anchorDate: request.anchor,
+                intervalComponents: request.cadence.dateComponent
+            )
+
+            query.initialResultsHandler = { [weak hkStore] query, collection, error in
+                hkStore?.stop(query)
+
+                if let error = error {
+                    return continuation.resume(returning: .failure(.failedToReadStats(msg: "\(error)")))
+                }
+                guard let collection = collection else {
+                    return continuation.resume(returning: .failure(.failedToRead_noStats))
+                }
+
+                let stats: [HKFStatsAggregationSample] = collection
+                    .statistics()
+                    .compactMap {
+                        HKFModelBuilder.build(
+                            $0,
+                            metricType: request.associatedType,
+                            aggregation: request.aggregation
+                        )
+                    }
+
+                continuation.resume(returning: .success(
+                    .init(
+                        stats: stats,
+                        aggregation: request.aggregation,
+                        metricType: request.associatedType
+                    )
+                ))
+            }
+
+            hkStore.execute(query)
+        }
+    }
+
+    private func buildPeriod(_ dateComponents: DateComponents, cadence: HKFCadence) -> HKFPeriod? {
+        HKFCadence.buildPeriod(from: dateComponents, cadence: cadence)
     }
 
     public func quantityStatsSubscription(request: HKReadStatsRequest) -> AnyPublisher<HKFStatsCollection, HKFError> {
@@ -560,7 +638,13 @@ extension HKFacade {
 
     private func writeQuantitySample(type: HKFMetricType, value: Double, period: HKFPeriod, device: HKFDevice, meta: HKFMetadata?) async -> Result<Void, HKFError> {
         guard let qt = type.asQuantityType else {
-            return .failure(.failedToSaveCategorySample)
+            return .failure(.failedToSave_unsupportedType)
+        }
+        guard value.isFinite, value >= 0 else {
+            return .failure(.invalidQuantityValue)
+        }
+        guard period.start <= period.end else {
+            return .failure(.invalidPeriod)
         }
 
         let sample = HKQuantitySample(

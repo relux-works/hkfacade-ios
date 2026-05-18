@@ -3,6 +3,7 @@ import Foundation
 public enum HKFError: Error {
     case hkNotAvailable
     case noAccessForDomain
+    case authorizationDenied
     case typeIsNotInDomain
     case failedToGetQuantityType
     case failedToReadStats(msg: String)
@@ -16,4 +17,7 @@ public enum HKFError: Error {
     case failedToRead_unsupportedType
     case failedToSave_unsupportedType
     case failedToSave_invalidPeriod
+    case invalidQuantityValue
+    case invalidPeriod
+    case unsupportedAggregation(metric: HKFMetricType, aggregation: HKFAggregationType)
 }

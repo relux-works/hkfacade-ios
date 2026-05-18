@@ -54,4 +54,23 @@ public enum HKFCadence: Identifiable, Hashable, Comparable {
     public static func <(lhs: HKFCadence, rhs: HKFCadence) -> Bool {
         lhs.weight < rhs.weight
     }
+
+    /// Builds an `HKFPeriod` that spans one cadence interval starting at the date represented
+    /// by the given `DateComponents`.
+    ///
+    /// Returns `nil` when the date components cannot be resolved to a concrete date in the
+    /// current calendar.
+    static func buildPeriod(from dateComponents: DateComponents, cadence: HKFCadence) -> HKFPeriod? {
+        guard let start = Calendar.current.date(from: dateComponents) else { return nil }
+        let end: Date
+        switch cadence {
+        case .years: end = start.add(years: 1)
+        case .months: end = start.add(months: 1)
+        case .weeks: end = start.add(weeks: 1)
+        case .days: end = start.add(days: 1)
+        case .hours: end = start.add(hours: 1)
+        case .minutes: end = start.add(minutes: 1)
+        }
+        return .init(start: start, end: end)
+    }
 }
