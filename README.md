@@ -39,7 +39,7 @@ Add both keys when your app reads and writes HealthKit data:
 
 ### Request authorization (split read vs write)
 
-Recommended path — the prompt shows only the access kinds your app actually needs:
+Recommended path: the prompt shows only the access kinds your app actually needs:
 
 ```swift
 let facade: AnyHKFacade = HKFacade()
@@ -85,16 +85,16 @@ case .failure(let err):
 ```
 
 The library routes quantity metrics (`steps`, `distance`, energy, heart rate, etc.)
-through `HKStatisticsCollectionQuery` automatically — the canonical HealthKit API
+through `HKStatisticsCollectionQuery` automatically, via the canonical HealthKit API
 for cumulative quantities.
 
 #### Aggregation compatibility
 
 Not every aggregation makes sense for every metric:
 
-- **Cumulative** metrics (steps, distance, basal/active energy) — only `.sum` and
+- **Cumulative** metrics (steps, distance, basal/active energy): only `.sum` and
   `.mostRecent` are accepted.
-- **Discrete** metrics (heart rate, oxygen saturation, SDNN, BP components) — only
+- **Discrete** metrics (heart rate, oxygen saturation, SDNN, BP components): only
   `.avg`, `.min`, `.max`, and `.mostRecent` are accepted.
 
 Requesting an incompatible combination returns
@@ -136,10 +136,10 @@ For distance: `.quantitySample(st: .distance, value: meters, period: period)`.
 
 Convenience groupings of metric types for `requestAccess`:
 
-- `.pedometer` — `[.steps, .distance]`
-- `.fitness` — `[.steps, .distance, .basalEnergy, .activeEnergy]`
-- `.cardio` — heart-rate family + blood pressure
-- `.meditation` — `[.mindfulMinutes]`
+- `.pedometer`: `[.steps, .distance]`
+- `.fitness`: `[.steps, .distance, .basalEnergy, .activeEnergy]`
+- `.cardio`: heart-rate family + blood pressure
+- `.meditation`: `[.mindfulMinutes]`
 
 ## Supported metrics
 
@@ -162,7 +162,7 @@ Convenience groupings of metric types for `requestAccess`:
 
 - iOS 14+
 - watchOS 7+
-- macOS 13+ (test/build only — HealthKit on macOS has limited surface)
+- macOS 13+ (test/build only: HealthKit on macOS has limited surface)
 
 <!-- relux-ecosystem:start -->
 
